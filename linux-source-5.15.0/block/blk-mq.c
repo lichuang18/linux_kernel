@@ -1582,7 +1582,7 @@ static void __blk_mq_delay_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async,
 	if (unlikely(blk_mq_hctx_stopped(hctx)))
 		return;
 
-	if (!async && !(hctx->flags & BLK_MQ_F_BLOCKING)) {
+	if (!async && !(hctx->flags & BLK_MQ_F_BLOCKING)) { //同步调度
 		int cpu = get_cpu();
 		if (cpumask_test_cpu(cpu, hctx->cpumask)) {
 			__blk_mq_run_hw_queue(hctx);
@@ -2203,7 +2203,7 @@ blk_qc_t blk_mq_submit_bio(struct bio *bio)
 	struct request_queue *q = bio->bi_bdev->bd_disk->queue;
 	const int is_sync = op_is_sync(bio->bi_opf);
 	const int is_flush_fua = op_is_flush(bio->bi_opf);
-	struct blk_mq_alloc_data data = {
+	struct blk_mq_alloc_data data = { //lch 用于request分配过程中的参数载体
 		.q		= q,
 	};
 	struct request *rq;
@@ -2214,58 +2214,60 @@ blk_qc_t blk_mq_submit_bio(struct bio *bio)
 	blk_status_t ret;
 	bool hipri;
 
-	blk_queue_bounce(q, &bio);
-	__blk_queue_split(&bio, &nr_segs);
-	if (!bio)
+	blk_queue_bounce(q, &bio);  //处理内存地址不支持的情况（DMA bounce buffer）
+	__blk_queue_split(&bio, &nr_segs); //若bio过大，会被拆成多个
+	if (!bio) //被拆空或失败，退出
 		goto queue_exit;
 
-	if (!bio_integrity_prep(bio))
+	if (!bio_integrity_prep(bio))//数据完整性准备，失败则退出
+		goto queue_exit;
+	//尝试bio合并
+	if (!is_flush_fua && !blk_queue_nomerges(q) &&  //plug合并,如果是FUA或者REQ_PREFLUSH请求,需要养个的顺序和隔离性,所以不能合并
+	    blk_attempt_plug_merge(q, bio, nr_segs, &same_queue_rq))//尝试合并的函数 ，将bio合并到还没提交的request中
+		//plug 是 Linux 块层中的一种I/O 合并优化机制，在真正提交请求前会短暂延迟，等待更多请求一起提交
+		//!blk_queue_nomerges(q) 判断队列是否禁止合并操作
+		goto queue_exit;   //若能合并成功，如mq-deadline的read-black tree插入，bio被吃掉并结束
+
+	if (blk_mq_sched_bio_merge(q, bio, nr_segs))//调度器合并，调度器可排序可优化，但略复杂  将bio合并到还没提交的调度器维护的request队列中的某个request，减少request数量，提升吞吐率
 		goto queue_exit;
 
-	if (!is_flush_fua && !blk_queue_nomerges(q) &&
-	    blk_attempt_plug_merge(q, bio, nr_segs, &same_queue_rq))
-		goto queue_exit;
-
-	if (blk_mq_sched_bio_merge(q, bio, nr_segs))
-		goto queue_exit;
-
-	rq_qos_throttle(q, bio);
+	rq_qos_throttle(q, bio); //io节流策略，qos控制   blk-throttle/blk-iocost/blk-cgroup
 
 	hipri = bio->bi_opf & REQ_HIPRI;
 
 	data.cmd_flags = bio->bi_opf;
-	rq = __blk_mq_alloc_request(&data);
-	if (unlikely(!rq)) {
+	rq = __blk_mq_alloc_request(&data);//分配一个新的request，填充结构信息
+	if (unlikely(!rq)) { //分配失败
 		rq_qos_cleanup(q, bio);
 		if (bio->bi_opf & REQ_NOWAIT)
 			bio_wouldblock_error(bio);
 		goto queue_exit;
 	}
 
-	trace_block_getrq(bio);
+	trace_block_getrq(bio);//跟踪分析点
 
-	rq_qos_track(q, rq, bio);
+	rq_qos_track(q, rq, bio);//将rq和bio绑定，供qos追踪
 
 	cookie = request_to_qc_t(data.hctx, rq);
+	//获取该request的cookie，标识IO的轻量级队列，便于调度器或底层驱动跟踪rq的生命周期、优化合并或调度
+	blk_mq_bio_to_request(rq, bio, nr_segs);//真正完成bio  ->  request的字段拷贝
 
-	blk_mq_bio_to_request(rq, bio, nr_segs);
-
-	ret = blk_crypto_rq_get_keyslot(rq);
-	if (ret != BLK_STS_OK) {
+	ret = blk_crypto_rq_get_keyslot(rq);//如果开启加密，分配加密的keyslot
+	if (ret != BLK_STS_OK) { //加密失败，直接结束   正常加密成功或者rq根本没有启用加密就会返回BLK_STS_OK，跳过该if语句
 		bio->bi_status = ret;
 		bio_endio(bio);
 		blk_mq_free_request(rq);
 		return BLK_QC_T_NONE;
 	}
 
-	plug = blk_mq_plug(q, bio);
-	if (unlikely(is_flush_fua)) {
+	plug = blk_mq_plug(q, bio);//plug是块层IO批处理机制，防止频繁提交耽搁request，每个线程可以挂在一个plug，属于软层缓存
+	if (unlikely(is_flush_fua)) { //flush请求必须立即提交到底层设备，绕过调度器，直接插入硬件队列
 		/* Bypass scheduler for flush requests */
 		blk_insert_flush(rq);
 		blk_mq_run_hw_queue(data.hctx, true);
-	} else if (plug && (q->nr_hw_queues == 1 ||
-		   blk_mq_is_sbitmap_shared(rq->mq_hctx->flags) ||
-		   q->mq_ops->commit_rqs || !blk_queue_nonrot(q))) {
+	} else if (plug && (q->nr_hw_queues == 1 ||  // plug启动，单队列设备，通常是HDD，适合plug机制进行请求合并  HDD一定会调这个，然后加入到plug，等到plug发送时，批量调用请求插入函数blk_mq_sched_insert_requests
+		   blk_mq_is_sbitmap_shared(rq->mq_hctx->flags) || //表示请求所在的hctx使用了共享bitmap
+		   q->mq_ops->commit_rqs || !blk_queue_nonrot(q))) { //驱动实现了commit_rqs函数，表示驱动支持批量提交请求，plug合并在驱动层有优势 ，队列是HDD设备
 		/*
 		 * Use plugging if we have a ->commit_rqs() hook as well, as
 		 * we know the driver uses bd->last in a smart fashion.
@@ -2288,10 +2290,10 @@ blk_qc_t blk_mq_submit_bio(struct bio *bio)
 		}
 
 		blk_add_rq_to_plug(plug, rq);
-	} else if (q->elevator) {
+	} else if (q->elevator) { //调度器关注，走的路线
 		/* Insert the request at the IO scheduler queue */
 		blk_mq_sched_insert_request(rq, false, true, true);
-	} else if (plug && !blk_queue_nomerges(q)) {
+	} else if (plug && !blk_queue_nomerges(q)) {  //如果之前合并失败，仍可将 rq 插入 plug；
 		/*
 		 * We do limited plugging. If the bio can be merged, do that.
 		 * Otherwise the existing request in the plug list will be
@@ -2311,19 +2313,19 @@ blk_qc_t blk_mq_submit_bio(struct bio *bio)
 		if (same_queue_rq) {
 			data.hctx = same_queue_rq->mq_hctx;
 			trace_block_unplug(q, 1, true);
-			blk_mq_try_issue_directly(data.hctx, same_queue_rq,
+			blk_mq_try_issue_directly(data.hctx, same_queue_rq, //同时尝试直接发出之前 plug 中已存在的 same_queue_rq。
 					&cookie);
 		}
-	} else if ((q->nr_hw_queues > 1 && is_sync) ||
-			!data.hctx->dispatch_busy) {
+	} else if ((q->nr_hw_queues > 1 && is_sync) || // 多硬件队列（nvme）且是同步请求，允许并发直发
+			!data.hctx->dispatch_busy) { //无调度器且硬件队列空闲，可直接发往硬件
 		/*
 		 * There is no scheduler and we can try to send directly
 		 * to the hardware.
 		 */
 		blk_mq_try_issue_directly(data.hctx, rq, &cookie);
-	} else {
-		/* Default case. */
-		blk_mq_sched_insert_request(rq, false, true, true);
+	} else { //默认 fallback：使用调度器插入路径 因为调度是模块化加载的，不一定是始终存在
+		/* Default case. */  //兜底存在
+		blk_mq_sched_insert_request(rq, false, true, true);//兜底存在
 	}
 
 	if (!hipri)

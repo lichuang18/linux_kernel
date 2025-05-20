@@ -310,7 +310,7 @@ static inline struct blk_plug *blk_mq_plug(struct request_queue *q,
 	 * For regular block devices or read operations, use the context plug
 	 * which may be NULL if blk_start_plug() was not executed.
 	 */
-	if (!blk_queue_is_zoned(q) || !op_is_write(bio_op(bio)))
+	if (!blk_queue_is_zoned(q) || !op_is_write(bio_op(bio))) // 普通设备或者zone设备的非写操作，返回当前plug
 		return current->plug;
 
 	/* Zoned block device write operation case: do not plug the BIO */

@@ -3651,7 +3651,7 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 	size_t		write_len;
 	pgoff_t		end;
 
-	write_len = iov_iter_count(from);
+	write_len = iov_iter_count(from); //返回的是总长度，B
 	end = (pos + write_len - 1) >> PAGE_SHIFT;
 
 	if (iocb->ki_flags & IOCB_NOWAIT) {
@@ -3660,7 +3660,7 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 					   pos + write_len - 1))
 			return -EAGAIN;
 	} else {
-		written = filemap_write_and_wait_range(mapping, pos,
+		written = filemap_write_and_wait_range(mapping, pos, //direct IO路径  刷dirty page
 							pos + write_len - 1);
 		if (written)
 			goto out;
@@ -3672,19 +3672,19 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 	 * about to write.  We do this *before* the write so that we can return
 	 * without clobbering -EIOCBQUEUED from ->direct_IO().
 	 */
-	written = invalidate_inode_pages2_range(mapping,
+	written = invalidate_inode_pages2_range(mapping, //清理page cache
 					pos >> PAGE_SHIFT, end);
 	/*
 	 * If a page can not be invalidated, return 0 to fall back
 	 * to buffered write.
 	 */
-	if (written) {
+	if (written) { 
 		if (written == -EBUSY)
-			return 0;
+			return 0; //退回 使用buffer IO
 		goto out;
 	}
 
-	written = mapping->a_ops->direct_IO(iocb, from);
+	written = mapping->a_ops->direct_IO(iocb, from);//lch 直接io方法调用
 
 	/*
 	 * Finally, try again to invalidate clean pages which might have been
@@ -3704,10 +3704,10 @@ generic_file_direct_write(struct kiocb *iocb, struct iov_iter *from)
 	 * Skip invalidation for async writes or if mapping has no pages.
 	 */
 	if (written > 0 && mapping->nrpages &&
-	    invalidate_inode_pages2_range(mapping, pos >> PAGE_SHIFT, end))
+	    invalidate_inode_pages2_range(mapping, pos >> PAGE_SHIFT, end)) //再次失效处理
 		dio_warn_stale_pagecache(file);
 
-	if (written > 0) {
+	if (written > 0) { //更新位置和inode
 		pos += written;
 		write_len -= written;
 		if (pos > i_size_read(inode) && !S_ISBLK(inode->i_mode)) {
@@ -3866,7 +3866,7 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (iocb->ki_flags & IOCB_DIRECT) {
 		loff_t pos, endbyte;
 
-		written = generic_file_direct_write(iocb, from);
+		written = generic_file_direct_write(iocb, from); //提交写请求
 		/*
 		 * If the write stopped short of completing, fall back to
 		 * buffered writes.  Some filesystems do this for writes to
@@ -3874,10 +3874,10 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		 * not succeed (even if it did, DAX does not handle dirty
 		 * page-cache pages correctly).
 		 */
-		if (written < 0 || !iov_iter_count(from) || IS_DAX(inode))
+		if (written < 0 || !iov_iter_count(from) || IS_DAX(inode)) //写入失败，或者iov_iter写完，或者是DAX
 			goto out;
 
-		status = generic_perform_write(file, from, pos = iocb->ki_pos);
+		status = generic_perform_write(file, from, pos = iocb->ki_pos); //buffered写  兜底？ 对于文件的hole，即使开了direct也会到这
 		/*
 		 * If generic_perform_write() returned a synchronous error
 		 * then we want to return the number of bytes which were
@@ -3908,8 +3908,8 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 			 * the number of bytes which were direct-written
 			 */
 		}
-	} else {
-		written = generic_perform_write(file, from, iocb->ki_pos);
+	} else { 
+		written = generic_perform_write(file, from, iocb->ki_pos); //缓存写
 		if (likely(written > 0))
 			iocb->ki_pos += written;
 	}

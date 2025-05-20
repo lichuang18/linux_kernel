@@ -1042,20 +1042,20 @@ static inline struct aio_kiocb *aio_get_req(struct kioctx *ctx)
 {
 	struct aio_kiocb *req;
 
-	req = kmem_cache_alloc(kiocb_cachep, GFP_KERNEL);
+	req = kmem_cache_alloc(kiocb_cachep, GFP_KERNEL);//slab分配释放很快，适合频繁分配释放的对象
 	if (unlikely(!req))
 		return NULL;
 
-	if (unlikely(!get_reqs_available(ctx))) {
+	if (unlikely(!get_reqs_available(ctx))) { // 检查ctx是否还有可用的资源ctx->reqs_available，最大为nr_request-1，提交-1，完成+1
 		kmem_cache_free(kiocb_cachep, req);
 		return NULL;
 	}
 
-	percpu_ref_get(&ctx->reqs);
-	req->ki_ctx = ctx;
-	INIT_LIST_HEAD(&req->ki_list);
-	refcount_set(&req->ki_refcnt, 2);
-	req->ki_eventfd = NULL;
+	percpu_ref_get(&ctx->reqs); // 是aio上下文的饮用计数，这里增加计数
+	req->ki_ctx = ctx;  //初始化req字段   
+	INIT_LIST_HEAD(&req->ki_list); // 后续挂入ctx->active_reqs 链表结构
+	refcount_set(&req->ki_refcnt, 2); //请求自身的引用计数，2表示提交和完成路径各持一个
+	req->ki_eventfd = NULL; //
 	return req;
 }
 
@@ -1491,7 +1491,7 @@ static int aio_prep_rw(struct kiocb *req, const struct iocb *iocb)
 	req->ki_flags &= ~IOCB_HIPRI; /* no one is going to poll for this I/O */
 	return 0;
 }
-
+// ret = aio_setup_rw(WRITE, iocb, &iovec, vectored, compat, &iter);
 static ssize_t aio_setup_rw(int rw, const struct iocb *iocb,
 		struct iovec **iovec, bool vectored, bool compat,
 		struct iov_iter *iter)
@@ -1499,13 +1499,13 @@ static ssize_t aio_setup_rw(int rw, const struct iocb *iocb,
 	void __user *buf = (void __user *)(uintptr_t)iocb->aio_buf;
 	size_t len = iocb->aio_nbytes;
 
-	if (!vectored) {
-		ssize_t ret = import_single_range(rw, buf, len, *iovec, iter);
+	if (!vectored) { //非vectored 普通的pread和pwrite
+		ssize_t ret = import_single_range(rw, buf, len, *iovec, iter);//创建一个只有一个的iovec的iov_iter
 		*iovec = NULL;
 		return ret;
 	}
 
-	return __import_iovec(rw, buf, len, UIO_FASTIOV, iovec, iter, compat);
+	return __import_iovec(rw, buf, len, UIO_FASTIOV, iovec, iter, compat);//向量处理
 }
 
 static inline void aio_rw_done(struct kiocb *req, ssize_t ret)
@@ -1564,7 +1564,7 @@ static int aio_write(struct kiocb *req, const struct iocb *iocb,
 	struct file *file;
 	int ret;
 
-	ret = aio_prep_rw(req, iocb);
+	ret = aio_prep_rw(req, iocb); //会设置ki_pos、ki_filp等基本字段，req和iocb绑定 
 	if (ret)
 		return ret;
 	file = req->ki_filp;
@@ -1574,10 +1574,10 @@ static int aio_write(struct kiocb *req, const struct iocb *iocb,
 	if (unlikely(!file->f_op->write_iter))
 		return -EINVAL;
 
-	ret = aio_setup_rw(WRITE, iocb, &iovec, vectored, compat, &iter);
+	ret = aio_setup_rw(WRITE, iocb, &iovec, vectored, compat, &iter); //构建写入数据结构（iov_iter）
 	if (ret < 0)
 		return ret;
-	ret = rw_verify_area(WRITE, file, &req->ki_pos, iov_iter_count(&iter));
+	ret = rw_verify_area(WRITE, file, &req->ki_pos, iov_iter_count(&iter)); // 范围校验
 	if (!ret) {
 		/*
 		 * Open-code file_start_write here to grab freeze protection,
@@ -1586,12 +1586,12 @@ static int aio_write(struct kiocb *req, const struct iocb *iocb,
 		 * released so that it doesn't complain about the held lock when
 		 * we return to userspace.
 		 */
-		if (S_ISREG(file_inode(file)->i_mode)) {
-			sb_start_write(file_inode(file)->i_sb);
-			__sb_writers_release(file_inode(file)->i_sb, SB_FREEZE_WRITE);
+		if (S_ISREG(file_inode(file)->i_mode)) {//只对普通文件，才需要冻结保护，所以设备文件以及socket等无需此保护
+			sb_start_write(file_inode(file)->i_sb);// 获取写入引用计数，如果是冻结，则会阻塞直到解冻
+			__sb_writers_release(file_inode(file)->i_sb, SB_FREEZE_WRITE);// 释放
 		}
-		req->ki_flags |= IOCB_WRITE;
-		aio_rw_done(req, call_write_iter(file, req, &iter));
+		req->ki_flags |= IOCB_WRITE;  //设置写标记
+		aio_rw_done(req, call_write_iter(file, req, &iter));//lch 这里是调用对应读写方法的入口函数
 	}
 	kfree(iovec);
 	return ret;
@@ -1934,7 +1934,7 @@ static int __io_submit_one(struct kioctx *ctx, const struct iocb *iocb,
 	if (unlikely(!req->ki_filp))
 		return -EBADF;
 
-	if (iocb->aio_flags & IOCB_FLAG_RESFD) {
+	if (iocb->aio_flags & IOCB_FLAG_RESFD) { //设置事件通知，完成时调用eventfd_signal()
 		struct eventfd_ctx *eventfd;
 		/*
 		 * If the IOCB_FLAG_RESFD flag of aio_flags is set, get an
@@ -1949,8 +1949,8 @@ static int __io_submit_one(struct kioctx *ctx, const struct iocb *iocb,
 		req->ki_eventfd = eventfd;
 	}
 
-	if (unlikely(put_user(KIOCB_KEY, &user_iocb->aio_key))) {
-		pr_debug("EFAULT: aio_key\n");
+	if (unlikely(put_user(KIOCB_KEY, &user_iocb->aio_key))) { //向用户空间的 iocb->aio_key 字段写入特殊标识值 KIOCB_KEY
+		pr_debug("EFAULT: aio_key\n");//这个字段通常用于标识回传结果的合法性或在 io_getevents() 中识别请求
 		return -EFAULT;
 	}
 
@@ -1961,13 +1961,13 @@ static int __io_submit_one(struct kioctx *ctx, const struct iocb *iocb,
 
 	switch (iocb->aio_lio_opcode) {
 	case IOCB_CMD_PREAD:
-		return aio_read(&req->rw, iocb, false, compat);
+		return aio_read(&req->rw, iocb, false, compat);//lch 00
 	case IOCB_CMD_PWRITE:
-		return aio_write(&req->rw, iocb, false, compat);
+		return aio_write(&req->rw, iocb, false, compat);//lch 11
 	case IOCB_CMD_PREADV:
-		return aio_read(&req->rw, iocb, true, compat);
+		return aio_read(&req->rw, iocb, true, compat);//lch 22
 	case IOCB_CMD_PWRITEV:
-		return aio_write(&req->rw, iocb, true, compat);
+		return aio_write(&req->rw, iocb, true, compat);//lch 33
 	case IOCB_CMD_FSYNC:
 		return aio_fsync(&req->fsync, iocb, false);
 	case IOCB_CMD_FDSYNC:
@@ -1980,7 +1980,7 @@ static int __io_submit_one(struct kioctx *ctx, const struct iocb *iocb,
 	}
 }
 
-static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
+static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,//处理一个请求
 			 bool compat)
 {
 	struct aio_kiocb *req;
@@ -1991,7 +1991,7 @@ static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 		return -EFAULT;
 
 	/* enforce forwards compatibility on users */
-	if (unlikely(iocb.aio_reserved2)) {
+	if (unlikely(iocb.aio_reserved2)) {        //  个人研究，可尝试使用该保留字段
 		pr_debug("EINVAL: reserve field set\n");
 		return -EINVAL;
 	}
@@ -2010,7 +2010,7 @@ static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 	if (unlikely(!req))
 		return -EAGAIN;
 
-	err = __io_submit_one(ctx, &iocb, user_iocb, req, compat);
+	err = __io_submit_one(ctx, &iocb, user_iocb, req, compat);//lch go on  
 
 	/* Done with the synchronous reference */
 	iocb_put(req);
@@ -2039,7 +2039,7 @@ static int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
  *	are available to queue any iocbs.  Will return 0 if nr is 0.  Will
  *	fail with -ENOSYS if not implemented.
  */
-SYSCALL_DEFINE3(io_submit, aio_context_t, ctx_id, long, nr,
+SYSCALL_DEFINE3(io_submit, aio_context_t, ctx_id, long, nr, //lch aio异步读写系统调用入口
 		struct iocb __user * __user *, iocbpp)
 {
 	struct kioctx *ctx;
@@ -2050,14 +2050,14 @@ SYSCALL_DEFINE3(io_submit, aio_context_t, ctx_id, long, nr,
 	if (unlikely(nr < 0))
 		return -EINVAL;
 
-	ctx = lookup_ioctx(ctx_id);
+	ctx = lookup_ioctx(ctx_id); // io_setup函数产生的系统调用让ctx_id = 内核中的kioctx的地址，这函数根据ctx_id反向找到这个kioctx
 	if (unlikely(!ctx)) {
 		pr_debug("EINVAL: invalid context id\n");
 		return -EINVAL;
 	}
 
-	if (nr > ctx->nr_events)
-		nr = ctx->nr_events;
+	if (nr > ctx->nr_events)//nr就是提交的请求个数  nr_request是支持的最大上下文数
+		nr = ctx->nr_events;//nr_request受到的限制，cat /proc/sys/fs/aio-max-nr，系统全局最大挂起AIO请求数
 
 	if (nr > AIO_PLUG_THRESHOLD)
 		blk_start_plug(&plug);
@@ -2069,7 +2069,7 @@ SYSCALL_DEFINE3(io_submit, aio_context_t, ctx_id, long, nr,
 			break;
 		}
 
-		ret = io_submit_one(ctx, user_iocb, false);
+		ret = io_submit_one(ctx, user_iocb, false); //lch 关键函数1，需要关注ctx和user_iocb
 		if (ret)
 			break;
 	}

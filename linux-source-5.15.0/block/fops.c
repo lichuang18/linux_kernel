@@ -195,7 +195,7 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	struct inode *inode = bdev_file_inode(file);
 	struct block_device *bdev = I_BDEV(inode);
 	struct blk_plug plug;
-	struct blkdev_dio *dio;
+	struct blkdev_dio *dio; 
 	struct bio *bio;
 	bool is_poll = (iocb->ki_flags & IOCB_HIPRI) != 0;
 	bool is_read = (iov_iter_rw(iter) == READ), is_sync;
@@ -203,15 +203,15 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	blk_qc_t qc = BLK_QC_T_NONE;
 	int ret = 0;
 
-	if ((pos | iov_iter_alignment(iter)) &
+	if ((pos | iov_iter_alignment(iter)) &  //要求pos和iov_iter的对齐符合设备的逻辑块大小
 	    (bdev_logical_block_size(bdev) - 1))
 		return -EINVAL;
 
-	bio = bio_alloc_kiocb(iocb, nr_pages, &blkdev_dio_pool);
+	bio = bio_alloc_kiocb(iocb, nr_pages, &blkdev_dio_pool); //分配bio，从blkdev_dio_pool中分配结构
 
-	dio = container_of(bio, struct blkdev_dio, bio);
+	dio = container_of(bio, struct blkdev_dio, bio); //bio和dio绑定在一起
 	dio->is_sync = is_sync = is_sync_kiocb(iocb);
-	if (dio->is_sync) {
+	if (dio->is_sync) { //如果是同步IO，记录当前线程，并持有bio引用计数，否则记录iocb
 		dio->waiter = current;
 		bio_get(bio);
 	} else {
@@ -227,9 +227,9 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	 * to issue
 	 */
 	if (!is_poll)
-		blk_start_plug(&plug);
+		blk_start_plug(&plug);//poll IO不plug，其他情况启用plug机制
 
-	for (;;) {
+	for (;;) {//构造并提交一个或多个bio
 		bio_set_dev(bio, bdev);
 		bio->bi_iter.bi_sector = pos >> 9;
 		bio->bi_write_hint = iocb->ki_hint;
@@ -237,13 +237,13 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 		bio->bi_end_io = blkdev_bio_end_io;
 		bio->bi_ioprio = iocb->ki_ioprio;
 
-		ret = bio_iov_iter_get_pages(bio, iter);
+		ret = bio_iov_iter_get_pages(bio, iter);//填充bio的page
 		if (unlikely(ret)) {
 			bio->bi_status = BLK_STS_IOERR;
 			bio_endio(bio);
 			break;
 		}
-		if (iocb->ki_flags & IOCB_NOWAIT) {
+		if (iocb->ki_flags & IOCB_NOWAIT) { //对于非阻塞写，只允许单个bio否则返回EAGAIN
 			/*
 			 * This is nonblocking IO, and we need to allocate
 			 * another bio if we have data left to map. As we
@@ -273,8 +273,8 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 		dio->size += bio->bi_iter.bi_size;
 		pos += bio->bi_iter.bi_size;
 
-		nr_pages = bio_iov_vecs_to_alloc(iter, BIO_MAX_VECS);
-		if (!nr_pages) {
+		nr_pages = bio_iov_vecs_to_alloc(iter, BIO_MAX_VECS);//如果还有数据，就构建新的bio
+		if (!nr_pages) { //如果是最后一个bio，就进入提交，然后退出循环
 			bool polled = false;
 
 			if (iocb->ki_flags & IOCB_HIPRI) {
@@ -282,38 +282,38 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 				polled = true;
 			}
 
-			qc = submit_bio(bio);
+			qc = submit_bio(bio);//最后一个bio提交的地方
 
 			if (polled)
 				WRITE_ONCE(iocb->ki_cookie, qc);
 			break;
 		}
 
-		if (!dio->multi_bio) {
+		if (!dio->multi_bio) {//第一次发现需要构建第二个bio，原本是false，取反后刚好进来
 			/*
 			 * AIO needs an extra reference to ensure the dio
 			 * structure which is embedded into the first bio
 			 * stays around.
 			 */
-			if (!is_sync)
-				bio_get(bio);
-			dio->multi_bio = true;
-			atomic_set(&dio->ref, 2);
+			if (!is_sync) 
+				bio_get(bio);//增加第一个bio的引用，防止它被提前释放
+			dio->multi_bio = true; 
+			atomic_set(&dio->ref, 2); //初始化dio的引用计数
 		} else {
-			atomic_inc(&dio->ref);
+			atomic_inc(&dio->ref); //后续每构建一个bio，就增加一次
 		}
 
-		submit_bio(bio);
+		submit_bio(bio);//lch 逻辑需要再仔细看看，是不是走这里的逻辑
 		bio = bio_alloc(GFP_KERNEL, nr_pages);
 	}
 
 	if (!is_poll)
-		blk_finish_plug(&plug);
+		blk_finish_plug(&plug);//和前面的start plug成对出现，触发block层的调度执行
 
-	if (!is_sync)
+	if (!is_sync)//异步IO直接返回
 		return -EIOCBQUEUED;
 
-	for (;;) {
+	for (;;) {//同步IO就要等所有的IO完成
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		if (!READ_ONCE(dio->waiter))
 			break;
@@ -329,7 +329,7 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
 	if (likely(!ret))
 		ret = dio->size;
 
-	bio_put(&dio->bio);
+	bio_put(&dio->bio); // 释放第一个bio 内嵌dio，安全释放blkdev_dio
 	return ret;
 }
 
@@ -337,14 +337,14 @@ static ssize_t blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 {
 	unsigned int nr_pages;
 
-	if (!iov_iter_count(iter))
+	if (!iov_iter_count(iter)) //检查数据长度，为0说明无需实际操作
 		return 0;
 
-	nr_pages = bio_iov_vecs_to_alloc(iter, BIO_MAX_VECS + 1);
-	if (is_sync_kiocb(iocb) && nr_pages <= BIO_MAX_VECS)
+	nr_pages = bio_iov_vecs_to_alloc(iter, BIO_MAX_VECS + 1);//计算需要的页数，用于构造BIO，根据iov_iter计算出bio_vec数量，表示需要的页数
+	if (is_sync_kiocb(iocb) && nr_pages <= BIO_MAX_VECS)// 同步且页数不多
 		return __blkdev_direct_IO_simple(iocb, iter, nr_pages);
 
-	return __blkdev_direct_IO(iocb, iter, bio_max_segs(nr_pages));
+	return __blkdev_direct_IO(iocb, iter, bio_max_segs(nr_pages));//异步或者大IO  可能构造多个BIO，当nr_pages大于BIO_MAX_VECS
 }
 
 static int blkdev_writepage(struct page *page, struct writeback_control *wbc)
@@ -503,25 +503,25 @@ static long block_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 static ssize_t blkdev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
-	struct inode *bd_inode = bdev_file_inode(file);
+	struct inode *bd_inode = bdev_file_inode(file);//通过file获取对应的inode
 	loff_t size = i_size_read(bd_inode);
-	struct blk_plug plug;
-	size_t shorted = 0;
+	struct blk_plug plug; 
+	size_t shorted = 0; //记录被截断的写入长度
 	ssize_t ret;
 
-	if (bdev_read_only(I_BDEV(bd_inode)))
+	if (bdev_read_only(I_BDEV(bd_inode))) //只读？
 		return -EPERM;
 
-	if (IS_SWAPFILE(bd_inode) && !is_hibernate_resume_dev(bd_inode->i_rdev))
+	if (IS_SWAPFILE(bd_inode) && !is_hibernate_resume_dev(bd_inode->i_rdev))//swap？
 		return -ETXTBSY;
 
-	if (!iov_iter_count(from))
+	if (!iov_iter_count(from))// 写入长度为0？  空写判断
 		return 0;
 
-	if (iocb->ki_pos >= size)
+	if (iocb->ki_pos >= size) //越界？
 		return -ENOSPC;
 
-	if ((iocb->ki_flags & (IOCB_NOWAIT | IOCB_DIRECT)) == IOCB_NOWAIT)
+	if ((iocb->ki_flags & (IOCB_NOWAIT | IOCB_DIRECT)) == IOCB_NOWAIT)//非阻塞直接写校验
 		return -EOPNOTSUPP;
 
 	size -= iocb->ki_pos;
@@ -532,9 +532,9 @@ static ssize_t blkdev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	blk_start_plug(&plug);
 	ret = __generic_file_write_iter(iocb, from);
-	if (ret > 0)
+	if (ret > 0) //写同步
 		ret = generic_write_sync(iocb, ret);
-	iov_iter_reexpand(from, iov_iter_count(from) + shorted);
+	iov_iter_reexpand(from, iov_iter_count(from) + shorted);//把之前因为设备大小被截断的 iov_iter 重新扩展回原始长度
 	blk_finish_plug(&plug);
 	return ret;
 }
@@ -638,12 +638,12 @@ static long blkdev_fallocate(struct file *file, int mode, loff_t start,
 	return error;
 }
 
-const struct file_operations def_blk_fops = {
+const struct file_operations def_blk_fops = {//lch 块设备的file ops
 	.open		= blkdev_open,
 	.release	= blkdev_close,
 	.llseek		= blkdev_llseek,
-	.read_iter	= blkdev_read_iter,
-	.write_iter	= blkdev_write_iter,
+	.read_iter	= blkdev_read_iter,  //读
+	.write_iter	= blkdev_write_iter, //写
 	.iopoll		= blkdev_iopoll,
 	.mmap		= generic_file_mmap,
 	.fsync		= blkdev_fsync,

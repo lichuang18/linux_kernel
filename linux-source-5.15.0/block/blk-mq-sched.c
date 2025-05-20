@@ -432,7 +432,7 @@ static bool blk_mq_sched_bypass_insert(struct blk_mq_hw_ctx *hctx,
 	return false;
 }
 
-void blk_mq_sched_insert_request(struct request *rq, bool at_head,
+void blk_mq_sched_insert_request(struct request *rq, bool at_head, //把一个构造好的请求插入到调度器队列或者直接加入dispatch
 				 bool run_queue, bool async)
 {
 	struct request_queue *q = rq->q;
@@ -440,9 +440,9 @@ void blk_mq_sched_insert_request(struct request *rq, bool at_head,
 	struct blk_mq_ctx *ctx = rq->mq_ctx;
 	struct blk_mq_hw_ctx *hctx = rq->mq_hctx;
 
-	WARN_ON(e && (rq->tag != BLK_MQ_NO_TAG));
+	WARN_ON(e && (rq->tag != BLK_MQ_NO_TAG));	
 
-	if (blk_mq_sched_bypass_insert(hctx, rq)) {
+	if (blk_mq_sched_bypass_insert(hctx, rq)) { //检查是否可以跳过调度器，例如请求类型为flush fua，或者调度器被绕过
 		/*
 		 * Firstly normal IO request is inserted to scheduler queue or
 		 * sw queue, meantime we add flush request to dispatch queue(
@@ -465,24 +465,24 @@ void blk_mq_sched_insert_request(struct request *rq, bool at_head,
 		 * intensive flush workloads can benefit in case of NCQ HW.
 		 */
 		at_head = (rq->rq_flags & RQF_FLUSH_SEQ) ? true : at_head;
-		blk_mq_request_bypass_insert(rq, at_head, false);
+		blk_mq_request_bypass_insert(rq, at_head, false); //不进入调度器，直接等待dispatch
 		goto run;
 	}
 
-	if (e) {
+	if (e) { //使用调度器插入
 		LIST_HEAD(list);
 
 		list_add(&rq->queuelist, &list);
 		e->type->ops.insert_requests(hctx, &list, at_head);
-	} else {
+	} else { //无调度器，插入软件队列  noop，直接插入ctx
 		spin_lock(&ctx->lock);
-		__blk_mq_insert_request(hctx, rq, at_head);
+		__blk_mq_insert_request(hctx, rq, at_head); //将请求加入到ctx->rq_lists[]  none情况？ 调度线程稍后会将它们移动到dispatch
 		spin_unlock(&ctx->lock);
 	}
 
 run:
 	if (run_queue)
-		blk_mq_run_hw_queue(hctx, async);
+		blk_mq_run_hw_queue(hctx, async); //运行硬件队列
 }
 
 void blk_mq_sched_insert_requests(struct blk_mq_hw_ctx *hctx,

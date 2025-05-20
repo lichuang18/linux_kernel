@@ -900,24 +900,24 @@ end_io:
 	return false;
 }
 
-static blk_qc_t __submit_bio(struct bio *bio)
+static blk_qc_t __submit_bio(struct bio *bio)//lch 擦，这份代码中还有另外一个__submit_bio函数，别走错了   通用的块层提交函数
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk;
-	blk_qc_t ret = BLK_QC_T_NONE;
+	struct gendisk *disk = bio->bi_bdev->bd_disk; //代表一个磁盘
+	blk_qc_t ret = BLK_QC_T_NONE; // 块层IO提交的返回cookie，用于后续polling等操作
 
-	if (unlikely(bio_queue_enter(bio) != 0))
+	if (unlikely(bio_queue_enter(bio) != 0))//如果队列处于冻结、重建、suspend等状态中，不能接受新的请求，会返回非0
 		return BLK_QC_T_NONE;
 
-	if (!submit_bio_checks(bio) || !blk_crypto_bio_prep(&bio))
-		goto queue_exit;
+	if (!submit_bio_checks(bio) || !blk_crypto_bio_prep(&bio)) // 提交前检查，边界合法、页数是否过多、bio操作类型是否支持， 加密处理
+		goto queue_exit; //如果失败执行跳转，清理状态
 	if (disk->fops->submit_bio) {
-		ret = disk->fops->submit_bio(bio);
+		ret = disk->fops->submit_bio(bio); //使用设备自定义的submit_bio（dm md zram）
 		goto queue_exit;
 	}
-	return blk_mq_submit_bio(bio);
+	return blk_mq_submit_bio(bio); //多队列调度提交
 
 queue_exit:
-	blk_queue_exit(disk->queue);
+	blk_queue_exit(disk->queue); //提交完后退出请求队列，释放引用
 	return ret;
 }
 
@@ -988,14 +988,14 @@ static blk_qc_t __submit_bio_noacct(struct bio *bio)
 
 static blk_qc_t __submit_bio_noacct_mq(struct bio *bio)
 {
-	struct bio_list bio_list[2] = { };
+	struct bio_list bio_list[2] = { };//初始化一个本地的bio_list数组，数组大小为2，[0]保存需要处理的后续bio，[1]预留位置，目前一般未使用
 	blk_qc_t ret;
 
-	current->bio_list = bio_list;
+	current->bio_list = bio_list; //将当前线程的bio_list指针设置为本地变量   防止递归太深导致内核栈溢出，设计了bio扁平提交机制
 
 	do {
 		ret = __submit_bio(bio);
-	} while ((bio = bio_list_pop(&bio_list[0])));
+	} while ((bio = bio_list_pop(&bio_list[0]))); //bio一个一个的弹出处理
 
 	current->bio_list = NULL;
 	return ret;
@@ -1018,14 +1018,14 @@ blk_qc_t submit_bio_noacct(struct bio *bio)
 	 * to collect a list of requests submited by a ->submit_bio method while
 	 * it is active, and then process them after it returned.
 	 */
-	if (current->bio_list) {
-		bio_list_add(&current->bio_list[0], bio);
+	if (current->bio_list) { // Linux 块层中 防止嵌套 I/O 递归提交导致栈溢出 的关键机制   这里就是会检查若是非空，就说明不是最外层，这时只排队，不递交
+		bio_list_add(&current->bio_list[0], bio); //current是当前正在运行的进程，bio_list是当前任务线程的bio提交缓存链表指针，用于推迟处理嵌套提交的bio
 		return BLK_QC_T_NONE;
 	}
 
 	if (!bio->bi_bdev->bd_disk->fops->submit_bio)
-		return __submit_bio_noacct_mq(bio);
-	return __submit_bio_noacct(bio);
+		return __submit_bio_noacct_mq(bio); //新路径
+	return __submit_bio_noacct(bio); //传统路径
 }
 EXPORT_SYMBOL(submit_bio_noacct);
 
@@ -1044,14 +1044,14 @@ EXPORT_SYMBOL(submit_bio_noacct);
  */
 blk_qc_t submit_bio(struct bio *bio)
 {
-	if (blkcg_punt_bio_submit(bio))
+	if (blkcg_punt_bio_submit(bio))//这是对块控制组的支持，如果这个bio属于一个io cgroup，可能需要切换到特定的工作线程异步处理
 		return BLK_QC_T_NONE;
 
 	/*
 	 * If it's a regular read/write or a barrier with data attached,
 	 * go through the normal accounting stuff before submission.
 	 */
-	if (bio_has_data(bio)) {
+	if (bio_has_data(bio)) { //统计  供 /proc/vmstat、cgroup 和性能分析使用
 		unsigned int count;
 
 		if (unlikely(bio_op(bio) == REQ_OP_WRITE_SAME))
@@ -1074,7 +1074,7 @@ blk_qc_t submit_bio(struct bio *bio)
 	 * the submitting cgroup IO-throttled, submission can be a significant
 	 * part of overall IO time.
 	 */
-	if (unlikely(bio_op(bio) == REQ_OP_READ &&
+	if (unlikely(bio_op(bio) == REQ_OP_READ && //这是用于内存压力分析工具的高阶特性，通常在高负载下才有用
 	    bio_flagged(bio, BIO_WORKINGSET))) {
 		unsigned long pflags;
 		blk_qc_t ret;
@@ -1667,7 +1667,7 @@ void blk_start_plug(struct blk_plug *plug)
 	/*
 	 * If this is a nested plug, don't actually assign it.
 	 */
-	if (tsk->plug)
+	if (tsk->plug) //如果有plug，则返回即可，
 		return;
 
 	INIT_LIST_HEAD(&plug->mq_list);

@@ -515,11 +515,11 @@ void iov_iter_init(struct iov_iter *i, unsigned int direction,
 	*i = (struct iov_iter) {
 		.iter_type = ITER_IOVEC,
 		.nofault = false,
-		.data_source = direction,
+		.data_source = direction, //读写类型，读入 还是 写入
 		.iov = iov,
-		.nr_segs = nr_segs,
-		.iov_offset = 0,
-		.count = count
+		.nr_segs = nr_segs,  //iovec的元素个数
+		.iov_offset = 0, 
+		.count = count //有效字节数  len
 	};
 }
 EXPORT_SYMBOL(iov_iter_init);
@@ -1942,7 +1942,7 @@ ssize_t __import_iovec(int type, const struct iovec __user *uvec,
 	unsigned long seg;
 	struct iovec *iov;
 
-	iov = iovec_from_user(uvec, nr_segs, fast_segs, *iovp, compat);
+	iov = iovec_from_user(uvec, nr_segs, fast_segs, *iovp, compat);//从用户空间拷贝iovec数组
 	if (IS_ERR(iov)) {
 		*iovp = NULL;
 		return PTR_ERR(iov);
@@ -1956,7 +1956,7 @@ ssize_t __import_iovec(int type, const struct iovec __user *uvec,
 	 * Linux caps all read/write calls to MAX_RW_COUNT, and avoids the
 	 * overflow case.
 	 */
-	for (seg = 0; seg < nr_segs; seg++) {
+	for (seg = 0; seg < nr_segs; seg++) { //验证段的合法性
 		ssize_t len = (ssize_t)iov[seg].iov_len;
 
 		if (!access_ok(iov[seg].iov_base, len)) {
@@ -1973,7 +1973,7 @@ ssize_t __import_iovec(int type, const struct iovec __user *uvec,
 		total_len += len;
 	}
 
-	iov_iter_init(i, type, iov, nr_segs, total_len);
+	iov_iter_init(i, type, iov, nr_segs, total_len);//构造iov_iter
 	if (iov == *iovp)
 		*iovp = NULL;
 	else
